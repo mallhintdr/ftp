@@ -8,7 +8,6 @@ import ftplib
 import aiohttp
 from dotenv import load_dotenv
 import json
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
@@ -16,6 +15,11 @@ load_dotenv()
 
 MAX_GROUP_SIZE = 200 * 1024 * 1024
 SUBFOLDER_BATCH_SIZE = 200 * 1024 * 1024
+
+
+def log(message: str) -> None:
+    """Thread-safe console logging that keeps tqdm progress bars intact."""
+    tqdm.write(message)
 
 def get_directory_size(directory):
     total = 0
@@ -56,15 +60,27 @@ def batch_subfolders_by_size(folder, max_size=SUBFOLDER_BATCH_SIZE):
 def group_folders_by_size(folder_paths, max_group_size=MAX_GROUP_SIZE):
     groups = []
     current_group, current_size = [], 0
-    print(f"Scanning {len(folder_paths)} folders for grouping...")
-    folder_sizes = []
-    for folder in tqdm(folder_paths, desc="Size scan", unit="folder"):
-        folder_sizes.append((folder, get_directory_size(folder)))
-    for folder, folder_size in tqdm(folder_sizes, desc="Grouping", unit="group"):
+    log(f"Scanning {len(folder_paths)} folders for grouping...")
+
+    with ThreadPoolExecutor() as executor:
+        sizes = list(
+            zip(
+                folder_paths,
+                tqdm(
+                    executor.map(get_directory_size, folder_paths),
+                    total=len(folder_paths),
+                    desc="Size scan",
+                    unit="folder",
+                ),
+            )
+        )
+
+    for folder, folder_size in tqdm(sizes, desc="Grouping", unit="group"):
         if folder_size > max_group_size:
-            print(f"[Split] {os.path.basename(folder)} ({folder_size//1024//1024} MB) too large, splitting...")
-            batches = batch_subfolders_by_size(folder, max_group_size)
-            for batch in batches:
+            log(
+                f"[Split] {os.path.basename(folder)} ({folder_size//1024//1024} MB) too large, splitting..."
+            )
+            for batch in batch_subfolders_by_size(folder, max_group_size):
                 groups.append(batch)
         elif current_size + folder_size <= max_group_size:
             current_group.append(folder)
@@ -75,6 +91,7 @@ def group_folders_by_size(folder_paths, max_group_size=MAX_GROUP_SIZE):
     if current_group:
         groups.append(current_group)
     return groups
+
 
 def zip_group_7z(folders, base_dir, zip_path, timeout=900):
     rel_paths = [os.path.relpath(folder, base_dir) for folder in folders]
@@ -177,19 +194,18 @@ def pipeline_group(
     else:
         zipped = zip_group_7z(group_folders, base_dir, zip_path)
         if not zipped or not os.path.exists(zip_path):
-            print(f"[{job_index}/{total_jobs}] {zip_name} ZIP Failed.")
-            return False
+        log(f"[{job_index}/{total_jobs}] {zip_name} ZIP Failed.")
+        return False
         update_status_threadsafe(status_path, status_dict, zip_name, "zipped")
         progress.update(1)
-
     # UPLOAD
     if status.get("uploaded"):
         progress.update(1)
     else:
         uploaded = upload_file_ftp(ftp_host, ftp_user, ftp_password, zip_path, remote_ftp_dir)
-        if not uploaded:
-            print(f"[{job_index}/{total_jobs}] {zip_name} UPLOAD Failed.")
-            return False
+        if not uploaded: 
+        log(f"[{job_index}/{total_jobs}] {zip_name} UPLOAD Failed.")
+        return False
         update_status_threadsafe(status_path, status_dict, zip_name, "uploaded")
         progress.update(1)
 
@@ -201,12 +217,11 @@ def pipeline_group(
         asyncio.set_event_loop(loop)
         unzipped = loop.run_until_complete(trigger_unzip(php_unzip_url, clean_remote_folder, zip_name))
         loop.close()
-        if not unzipped:
-            print(f"[{job_index}/{total_jobs}] {zip_name} UNZIP Failed.")
-            return False
+        if not unzipped: 
+        log(f"[{job_index}/{total_jobs}] {zip_name} UNZIP Failed.")
+        return False
         update_status_threadsafe(status_path, status_dict, zip_name, "unzipped")
         progress.update(1)
-
     # DELETE REMOTE ZIP
     if status.get("deleted"):
         progress.update(1)
@@ -215,9 +230,8 @@ def pipeline_group(
             delete_remote_zip(ftp_host, ftp_user, ftp_password, clean_remote_folder, zip_name)
             update_status_threadsafe(status_path, status_dict, zip_name, "deleted")
             progress.update(1)
-        except Exception:
-            print(f"[{job_index}/{total_jobs}] {zip_name} DELETE REMOTE Failed.")
-
+            except Exception:
+            log(f"[{job_index}/{total_jobs}] {zip_name} DELETE REMOTE Failed.")
     # DELETE LOCAL ZIP
     if status.get("deleted_local"):
         progress.update(1)
@@ -226,8 +240,8 @@ def pipeline_group(
             os.remove(zip_path)
             update_status_threadsafe(status_path, status_dict, zip_name, "deleted_local")
             progress.update(1)
-        except Exception:
-            print(f"[{job_index}/{total_jobs}] {zip_name} DELETE LOCAL Failed.")
+            except Exception:
+            log(f"[{job_index}/{total_jobs}] {zip_name} DELETE LOCAL Failed.")
     return True
 
 def main():
@@ -240,22 +254,21 @@ def main():
     root = tk.Tk()
     root.withdraw()
     selected_dir = filedialog.askdirectory(title="Select Directory Containing Folders to Process")
-    if not selected_dir:
-        print("No directory selected. Exiting.")
-        return
+    if not selected_dir: 
+    log("No directory selected. Exiting.")
+    return
 
     all_subfolders = [
         os.path.join(selected_dir, d)
         for d in os.listdir(selected_dir)
         if os.path.isdir(os.path.join(selected_dir, d))
     ]
-    if not all_subfolders:
-        print("No subfolders found. Exiting.")
-        return
-
+    if not all_subfolders: 
+    log("No subfolders found. Exiting.")
+    return
+    
     groups = group_folders_by_size(all_subfolders)
-    print(f"\nTotal {len(groups)} groups to process.")
-
+    log(f"\nTotal {len(groups)} groups to process.")
     ftp_host = os.getenv("FTP_HOST")
     ftp_user = os.getenv("FTP_USER")
     ftp_password = os.getenv("FTP_PASSWORD")
@@ -263,9 +276,9 @@ def main():
     remote_folder = remote_base_dir + '/' + os.path.basename(selected_dir)
     php_unzip_url = "https://dashboard.naqsha-zameen.pk/php/unzip.php"
 
-    if not all([ftp_host, ftp_user, ftp_password]):
-        print("ERROR: FTP credentials missing.")
-        return
+    if not all([ftp_host, ftp_user, ftp_password]): 
+    log("ERROR: FTP credentials missing.")
+    return
 
     status_path = os.path.join(selected_dir, "upload_status.json")
     status_dict = load_status(status_path)
@@ -280,13 +293,12 @@ def main():
 
     total_jobs = len(jobs)
     if total_jobs == 0:
-        print("All groups already uploaded!")
+        log("All groups already uploaded!")
         return
-
     clean_remote_folder = remove_double_public_html(remote_folder)
     remote_ftp_dir = f"dashboard/{clean_remote_folder}".replace("//", "/").replace("\\", "/")
 
-    print(f"\nProcessing started (4 parallel pipelines)...\n")
+    log(f"\nProcessing started (4 parallel pipelines)...\n")
     with ThreadPoolExecutor(max_workers=4) as executor:
         with tqdm(total=total_jobs * 5, desc="Groups Progress (all steps)", unit="step") as progress:
             futures = [
@@ -301,7 +313,7 @@ def main():
             for f in as_completed(futures):
                 pass
 
-    print("\nAll groups processed.")
+    log("\nAll groups processed.")
 
 if __name__ == "__main__":
     main()
