@@ -18,8 +18,8 @@ SUBFOLDER_BATCH_SIZE = 200 * 1024 * 1024
 
 
 def log(message: str) -> None:
-    """Thread-safe console logging that keeps tqdm progress bars intact."""
     tqdm.write(message)
+
 
 def get_directory_size(directory):
     total = 0
@@ -31,6 +31,7 @@ def get_directory_size(directory):
                 logging.error(f"Error getting size for {file} in {root}: {e}")
     return total
 
+
 def batch_subfolders_by_size(folder, max_size=SUBFOLDER_BATCH_SIZE):
     all_items = []
     for entry in os.listdir(folder):
@@ -38,8 +39,7 @@ def batch_subfolders_by_size(folder, max_size=SUBFOLDER_BATCH_SIZE):
         size = get_directory_size(path) if os.path.isdir(path) else os.path.getsize(path)
         all_items.append((path, size))
     all_items.sort(key=lambda x: -x[1])
-    batches = []
-    batch, batch_size = [], 0
+    batches, batch, batch_size = [], [], 0
     for path, size in all_items:
         if size > max_size:
             if batch:
@@ -57,29 +57,22 @@ def batch_subfolders_by_size(folder, max_size=SUBFOLDER_BATCH_SIZE):
         batches.append(batch)
     return batches
 
+
 def group_folders_by_size(folder_paths, max_group_size=MAX_GROUP_SIZE):
     groups = []
     current_group, current_size = [], 0
     log(f"Scanning {len(folder_paths)} folders for grouping...")
 
     with ThreadPoolExecutor() as executor:
-        sizes = list(
-            zip(
-                folder_paths,
-                tqdm(
-                    executor.map(get_directory_size, folder_paths),
-                    total=len(folder_paths),
-                    desc="Size scan",
-                    unit="folder",
-                ),
-            )
-        )
+        sizes = list(zip(
+            folder_paths,
+            tqdm(executor.map(get_directory_size, folder_paths),
+                 total=len(folder_paths), desc="Size scan", unit="folder")
+        ))
 
     for folder, folder_size in tqdm(sizes, desc="Grouping", unit="group"):
         if folder_size > max_group_size:
-            log(
-                f"[Split] {os.path.basename(folder)} ({folder_size//1024//1024} MB) too large, splitting..."
-            )
+            log(f"[Split] {os.path.basename(folder)} ({folder_size//1024//1024} MB) too large, splitting...")
             for batch in batch_subfolders_by_size(folder, max_group_size):
                 groups.append(batch)
         elif current_size + folder_size <= max_group_size:
@@ -103,14 +96,12 @@ def zip_group_7z(folders, base_dir, zip_path, timeout=900):
         logging.error(f"Error zipping group to {zip_path}: {e}")
         return False
 
+
 def remove_double_public_html(path):
-    while True:
-        norm = path.lstrip("/\\")
-        if norm.lower().startswith("public_html"):
-            path = norm[10:]
-        else:
-            break
-    return path.lstrip("/\\")
+    while path.lower().startswith("public_html") or path.startswith("/"):
+        path = path[len("public_html"):].lstrip("/\\")
+    return path
+
 
 def upload_file_ftp(ftp_host, ftp_user, ftp_password, local_file, remote_dir, timeout=120):
     try:
@@ -119,15 +110,11 @@ def upload_file_ftp(ftp_host, ftp_user, ftp_password, local_file, remote_dir, ti
         ftp.login(ftp_user, ftp_password)
         ftp.set_pasv(True)
         for part in remote_dir.strip("/").split("/"):
-            if part == "":
-                continue
-            try:
-                ftp.cwd(part)
-            except ftplib.error_perm:
+            if part:
                 try:
-                    ftp.mkd(part)
                     ftp.cwd(part)
-                except Exception:
+                except ftplib.error_perm:
+                    ftp.mkd(part)
                     ftp.cwd(part)
         with open(local_file, 'rb') as f:
             ftp.storbinary("STOR " + os.path.basename(local_file), f, blocksize=8192)
@@ -136,6 +123,7 @@ def upload_file_ftp(ftp_host, ftp_user, ftp_password, local_file, remote_dir, ti
     except Exception as e:
         logging.error(f"Error uploading {local_file}: {e}")
         return False
+
 
 def delete_remote_zip(host, user, password, remote_dir, filename, port=21):
     try:
@@ -149,6 +137,7 @@ def delete_remote_zip(host, user, password, remote_dir, filename, port=21):
     except Exception as e:
         logging.error(f"Error deleting remote zip {filename}: {e}")
 
+
 async def trigger_unzip(php_url, remote_dir, zip_filename):
     timeout = aiohttp.ClientTimeout(total=120)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -159,6 +148,7 @@ async def trigger_unzip(php_url, remote_dir, zip_filename):
             logging.error(f"Error triggering unzip for {zip_filename}: {e}", exc_info=True)
             return False
 
+
 def load_status(status_path):
     if os.path.exists(status_path):
         try:
@@ -168,48 +158,43 @@ def load_status(status_path):
             return {}
     return {}
 
+
 def save_status(status_path, status_dict):
     with open(status_path, "w") as f:
         json.dump(status_dict, f, indent=2)
 
+
 def update_status_threadsafe(status_path, status_dict, zip_name, step):
-    # Use this for thread/process safe status writes
     status_dict.setdefault(zip_name, {})
     status_dict[zip_name][step] = True
     save_status(status_path, status_dict)
 
-def pipeline_group(
-    group_folders, base_dir, ftp_host, ftp_user, ftp_password, remote_ftp_dir,
-    php_unzip_url, clean_remote_folder, zip_name, zip_path, job_index, total_jobs,
-    status_path, status_dict, progress
-):
-    status = status_dict.get(zip_name, {})
-    if not isinstance(status, dict):
-        status = {}
-        status_dict[zip_name] = status
 
-    # ZIP
+def pipeline_group(group_folders, base_dir, ftp_host, ftp_user, ftp_password, remote_ftp_dir,
+                   php_unzip_url, clean_remote_folder, zip_name, zip_path,
+                   job_index, total_jobs, status_path, status_dict, progress):
+    status = status_dict.get(zip_name, {})
+
     if status.get("zipped"):
         progress.update(1)
     else:
         zipped = zip_group_7z(group_folders, base_dir, zip_path)
         if not zipped or not os.path.exists(zip_path):
-        log(f"[{job_index}/{total_jobs}] {zip_name} ZIP Failed.")
-        return False
+            log(f"[{job_index}/{total_jobs}] {zip_name} ZIP Failed.")
+            return False
         update_status_threadsafe(status_path, status_dict, zip_name, "zipped")
         progress.update(1)
-    # UPLOAD
+
     if status.get("uploaded"):
         progress.update(1)
     else:
         uploaded = upload_file_ftp(ftp_host, ftp_user, ftp_password, zip_path, remote_ftp_dir)
-        if not uploaded: 
-        log(f"[{job_index}/{total_jobs}] {zip_name} UPLOAD Failed.")
-        return False
+        if not uploaded:
+            log(f"[{job_index}/{total_jobs}] {zip_name} UPLOAD Failed.")
+            return False
         update_status_threadsafe(status_path, status_dict, zip_name, "uploaded")
         progress.update(1)
 
-    # UNZIP (async, but wrapped synchronously)
     if status.get("unzipped"):
         progress.update(1)
     else:
@@ -217,84 +202,84 @@ def pipeline_group(
         asyncio.set_event_loop(loop)
         unzipped = loop.run_until_complete(trigger_unzip(php_unzip_url, clean_remote_folder, zip_name))
         loop.close()
-        if not unzipped: 
-        log(f"[{job_index}/{total_jobs}] {zip_name} UNZIP Failed.")
-        return False
+        if not unzipped:
+            log(f"[{job_index}/{total_jobs}] {zip_name} UNZIP Failed.")
+            return False
         update_status_threadsafe(status_path, status_dict, zip_name, "unzipped")
         progress.update(1)
-    # DELETE REMOTE ZIP
+
     if status.get("deleted"):
         progress.update(1)
     else:
         try:
             delete_remote_zip(ftp_host, ftp_user, ftp_password, clean_remote_folder, zip_name)
             update_status_threadsafe(status_path, status_dict, zip_name, "deleted")
-            progress.update(1)
-            except Exception:
+        except Exception as e:
             log(f"[{job_index}/{total_jobs}] {zip_name} DELETE REMOTE Failed.")
-    # DELETE LOCAL ZIP
+        progress.update(1)
+
     if status.get("deleted_local"):
         progress.update(1)
     else:
         try:
             os.remove(zip_path)
             update_status_threadsafe(status_path, status_dict, zip_name, "deleted_local")
-            progress.update(1)
-            except Exception:
+        except Exception as e:
             log(f"[{job_index}/{total_jobs}] {zip_name} DELETE LOCAL Failed.")
+        progress.update(1)
+
     return True
 
+
 def main():
-    logging.basicConfig(
-        filename="hybrid_workflow_7z.log",
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
+    logging.basicConfig(filename="hybrid_workflow_7z.log",
+                        level=logging.INFO,
+                        format="%(asctime)s - %(levelname)s - %(message)s")
 
     root = tk.Tk()
     root.withdraw()
     selected_dir = filedialog.askdirectory(title="Select Directory Containing Folders to Process")
-    if not selected_dir: 
-    log("No directory selected. Exiting.")
-    return
+    if not selected_dir:
+        log("No directory selected. Exiting.")
+        return
 
     all_subfolders = [
         os.path.join(selected_dir, d)
         for d in os.listdir(selected_dir)
         if os.path.isdir(os.path.join(selected_dir, d))
     ]
-    if not all_subfolders: 
-    log("No subfolders found. Exiting.")
-    return
-    
+    if not all_subfolders:
+        log("No subfolders found. Exiting.")
+        return
+
     groups = group_folders_by_size(all_subfolders)
     log(f"\nTotal {len(groups)} groups to process.")
+
     ftp_host = os.getenv("FTP_HOST")
     ftp_user = os.getenv("FTP_USER")
     ftp_password = os.getenv("FTP_PASSWORD")
     remote_base_dir = "Shajra Parcha"
-    remote_folder = remote_base_dir + '/' + os.path.basename(selected_dir)
+    remote_folder = os.path.join(remote_base_dir, os.path.basename(selected_dir))
     php_unzip_url = "https://dashboard.naqsha-zameen.pk/php/unzip.php"
 
-    if not all([ftp_host, ftp_user, ftp_password]): 
-    log("ERROR: FTP credentials missing.")
-    return
+    if not all([ftp_host, ftp_user, ftp_password]):
+        log("ERROR: FTP credentials missing.")
+        return
 
     status_path = os.path.join(selected_dir, "upload_status.json")
     status_dict = load_status(status_path)
 
     jobs = []
-    group_idx = 1
-    for group in groups:
-        zip_name = f"mauza_group_{group_idx}.zip"
+    for idx, group in enumerate(groups, start=1):
+        zip_name = f"mauza_group_{idx}.zip"
         zip_path = os.path.join(selected_dir, zip_name)
-        jobs.append((group, zip_name, zip_path, group_idx))
-        group_idx += 1
+        jobs.append((group, zip_name, zip_path, idx))
 
     total_jobs = len(jobs)
     if total_jobs == 0:
         log("All groups already uploaded!")
         return
+
     clean_remote_folder = remove_double_public_html(remote_folder)
     remote_ftp_dir = f"dashboard/{clean_remote_folder}".replace("//", "/").replace("\\", "/")
 
@@ -303,8 +288,8 @@ def main():
         with tqdm(total=total_jobs * 5, desc="Groups Progress (all steps)", unit="step") as progress:
             futures = [
                 executor.submit(
-                    pipeline_group,
-                    group, selected_dir, ftp_host, ftp_user, ftp_password, remote_ftp_dir,
+                    pipeline_group, group, selected_dir,
+                    ftp_host, ftp_user, ftp_password, remote_ftp_dir,
                     php_unzip_url, clean_remote_folder,
                     zip_name, zip_path, idx, total_jobs, status_path, status_dict, progress
                 )
@@ -314,6 +299,7 @@ def main():
                 pass
 
     log("\nAll groups processed.")
+
 
 if __name__ == "__main__":
     main()
