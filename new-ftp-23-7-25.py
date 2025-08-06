@@ -170,63 +170,104 @@ def update_status_threadsafe(status_path, status_dict, zip_name, step):
     save_status(status_path, status_dict)
 
 
-def pipeline_group(group_folders, base_dir, ftp_host, ftp_user, ftp_password, remote_ftp_dir,
-                   php_unzip_url, clean_remote_folder, zip_name, zip_path,
-                   job_index, total_jobs, status_path, status_dict, progress):
+def pipeline_group(
+    group_folders,
+    base_dir,
+    ftp_host,
+    ftp_user,
+    ftp_password,
+    remote_ftp_dir,
+    php_unzip_url,
+    clean_remote_folder,
+    zip_name,
+    zip_path,
+    job_index,
+    total_jobs,
+    status_path,
+    status_dict,
+    zip_progress,
+    upload_progress,
+    unzip_progress,
+    delete_progress,
+):
+    """Run zip → upload → unzip → delete pipeline for a single group.
+
+    Individual ``tqdm`` progress bars are provided for each stage so that
+    progress is clearly visible even when multiple groups are processed in
+    parallel.
+    """
+
     status = status_dict.get(zip_name, {})
 
+    # --- Zip ---
     if status.get("zipped"):
-        progress.update(1)
+        zip_progress.update(1)
     else:
+        log(f"[{job_index}/{total_jobs}] {zip_name}: zipping...")
         zipped = zip_group_7z(group_folders, base_dir, zip_path)
         if not zipped or not os.path.exists(zip_path):
             log(f"[{job_index}/{total_jobs}] {zip_name} ZIP Failed.")
             return False
         update_status_threadsafe(status_path, status_dict, zip_name, "zipped")
-        progress.update(1)
+        log(f"[{job_index}/{total_jobs}] {zip_name}: zip complete")
+        zip_progress.update(1)
 
+    # --- Upload ---
     if status.get("uploaded"):
-        progress.update(1)
+        upload_progress.update(1)
     else:
-        uploaded = upload_file_ftp(ftp_host, ftp_user, ftp_password, zip_path, remote_ftp_dir)
+        log(f"[{job_index}/{total_jobs}] {zip_name}: uploading...")
+        uploaded = upload_file_ftp(
+            ftp_host, ftp_user, ftp_password, zip_path, remote_ftp_dir
+        )
         if not uploaded:
             log(f"[{job_index}/{total_jobs}] {zip_name} UPLOAD Failed.")
             return False
         update_status_threadsafe(status_path, status_dict, zip_name, "uploaded")
-        progress.update(1)
+        log(f"[{job_index}/{total_jobs}] {zip_name}: upload complete")
+        upload_progress.update(1)
 
+    # --- Unzip ---
     if status.get("unzipped"):
-        progress.update(1)
+        unzip_progress.update(1)
     else:
+        log(f"[{job_index}/{total_jobs}] {zip_name}: triggering unzip...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        unzipped = loop.run_until_complete(trigger_unzip(php_unzip_url, clean_remote_folder, zip_name))
+        unzipped = loop.run_until_complete(
+            trigger_unzip(php_unzip_url, clean_remote_folder, zip_name)
+        )
         loop.close()
         if not unzipped:
             log(f"[{job_index}/{total_jobs}] {zip_name} UNZIP Failed.")
             return False
         update_status_threadsafe(status_path, status_dict, zip_name, "unzipped")
-        progress.update(1)
+        log(f"[{job_index}/{total_jobs}] {zip_name}: unzip triggered")
+        unzip_progress.update(1)
 
+    # --- Delete remote & local zip ---
     if status.get("deleted"):
-        progress.update(1)
+        delete_progress.update(1)
     else:
+        log(f"[{job_index}/{total_jobs}] {zip_name}: deleting remote zip...")
         try:
-            delete_remote_zip(ftp_host, ftp_user, ftp_password, clean_remote_folder, zip_name)
+            delete_remote_zip(
+                ftp_host, ftp_user, ftp_password, clean_remote_folder, zip_name
+            )
             update_status_threadsafe(status_path, status_dict, zip_name, "deleted")
+            log(f"[{job_index}/{total_jobs}] {zip_name}: remote zip deleted")
         except Exception as e:
             log(f"[{job_index}/{total_jobs}] {zip_name} DELETE REMOTE Failed.")
-        progress.update(1)
+        delete_progress.update(1)
 
     if status.get("deleted_local"):
-        progress.update(1)
+        pass
     else:
         try:
             os.remove(zip_path)
             update_status_threadsafe(status_path, status_dict, zip_name, "deleted_local")
         except Exception as e:
             log(f"[{job_index}/{total_jobs}] {zip_name} DELETE LOCAL Failed.")
-        progress.update(1)
 
     return True
 
@@ -284,14 +325,32 @@ def main():
     remote_ftp_dir = f"dashboard/{clean_remote_folder}".replace("//", "/").replace("\\", "/")
 
     log(f"\nProcessing started (4 parallel pipelines)...\n")
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        with tqdm(total=total_jobs * 5, desc="Groups Progress (all steps)", unit="step") as progress:
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        with tqdm(total=total_jobs, desc="Zipping", position=0) as zip_progress, \
+                tqdm(total=total_jobs, desc="Uploading", position=1) as upload_progress, \
+                tqdm(total=total_jobs, desc="Unzipping", position=2) as unzip_progress, \
+                tqdm(total=total_jobs, desc="Deleting", position=3) as delete_progress:
             futures = [
                 executor.submit(
-                    pipeline_group, group, selected_dir,
-                    ftp_host, ftp_user, ftp_password, remote_ftp_dir,
-                    php_unzip_url, clean_remote_folder,
-                    zip_name, zip_path, idx, total_jobs, status_path, status_dict, progress
+                    pipeline_group,
+                    group,
+                    selected_dir,
+                    ftp_host,
+                    ftp_user,
+                    ftp_password,
+                    remote_ftp_dir,
+                    php_unzip_url,
+                    clean_remote_folder,
+                    zip_name,
+                    zip_path,
+                    idx,
+                    total_jobs,
+                    status_path,
+                    status_dict,
+                    zip_progress,
+                    upload_progress,
+                    unzip_progress,
+                    delete_progress,
                 )
                 for group, zip_name, zip_path, idx in jobs
             ]
