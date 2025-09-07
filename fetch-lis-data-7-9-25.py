@@ -210,6 +210,8 @@ def validate_token_on_layer_post(base_url: str, clients: List['TokenClient']) ->
 # Cache layer fields per base_url
 _LAYER_FIELDS_CACHE: Dict[str, Dict[str, Tuple[Optional[str], Optional[str]]]] = {}
 _LAYER_MAXREC_CACHE: Dict[str, int] = {}
+# Track available field names to avoid requesting invalid ones
+_LAYER_AVAILABLE_FIELDS: Dict[str, Set[str]] = {}
 
 def resolve_field_mapping(base_url: str, clients: List['TokenClient']) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
     """
@@ -222,8 +224,11 @@ def resolve_field_mapping(base_url: str, clients: List['TokenClient']) -> Dict[s
     if base_url in _LAYER_FIELDS_CACHE:
         return _LAYER_FIELDS_CACHE[base_url]
     info = fetch_layer_info_post(base_url, clients)
+
     fields = info.get("fields", []) or []
     lut = {f["name"].lower(): (f["name"], f.get("type")) for f in fields if "name" in f}
+    # Remember the set of available field names (case-sensitive)
+    _LAYER_AVAILABLE_FIELDS[base_url] = {f["name"] for f in fields if "name" in f}
 
     id_candidates   = ["tehsil_id", "tehsilid", "teh_id", "tehcode", "tehsil_code"]
     name_candidates = ["tehsil", "tehsil_name", "tehname", "tehsilname"]
@@ -323,13 +328,19 @@ def fetch_tehsil_batch(base_url: str, clients: List['TokenClient'],
     name_field, _ = fm["tehsil_name"]
     where_q = build_where_typed(id_field, id_type, tehsil_id_str)
 
-    base_fields = ["Tehsil", "Tehsil_ID", "Mouza", "Mouza_ID",
-                   "Type", "M", "A", "K", "SK", "Label", "B", "MN"]
+    base_fields = [
+        "Tehsil", "Tehsil_ID", "Mouza", "Mouza_ID",
+        "Type", "M", "A", "K", "SK", "Label", "B", "MN"
+    ]
+    # Keep only fields actually present on the layer
+    available = _LAYER_AVAILABLE_FIELDS.get(base_url, set())
+    base_fields = [f for f in base_fields if f in available]
     if id_field and id_field not in base_fields: base_fields.append(id_field)
     if name_field and name_field not in base_fields: base_fields.append(name_field)
     out_fields = ",".join(base_fields)
 
-    url = f"{base_url}/query"
+
+url = f"{base_url}/query"
     form = {
         "where": where_q,
         "outFields": out_fields,
